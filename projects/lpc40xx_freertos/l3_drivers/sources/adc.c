@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdio.h>
 
 #include "adc.h"
 
@@ -49,5 +50,32 @@ uint16_t adc__get_adc_value(adc_channel_e channel_num) {
     result = (LPC_ADC->GDR >> 4) & twelve_bits; // 12bits - B15:B4
   }
 
+  return result;
+}
+void adc__enable_burst_mode(void) {
+  LPC_ADC->CR |= (1 << 16); // enable busts mode
+
+  LPC_ADC->CR &= ~(0xff);  // clear all ADC Selections
+  LPC_ADC->CR |= (1 << 2); // Select ADC 2
+
+  LPC_ADC->CR &= ~(0x111 << 24); // set the start bits to 000
+}
+
+uint16_t adc__get_channel_reading_with_burst_mode(adc_channel_e channel_num) {
+  uint16_t result = 0;
+  const uint16_t twelve_bits = 0x0FFF;
+  const uint32_t channel_masks = 0x7;
+  const uint32_t adc_conversion_complete = (1 << 31);
+  const uint32_t adc_overRun = (1 << 30);
+
+  if ((ADC__CHANNEL_2 == channel_num) || (ADC__CHANNEL_4 == channel_num) || (ADC__CHANNEL_5 == channel_num)) {
+
+    while (!(LPC_ADC->GDR & adc_conversion_complete)) { // Wait till conversion is complete
+      ;
+    }
+
+    result = (LPC_ADC->GDR >> 4) & twelve_bits; // 12bits - B15:B4
+    //    fprintf(stderr, "Result: %d Channel: %d\n", result, ((LPC_ADC->GDR >> 24) & channel_masks));
+  }
   return result;
 }

@@ -1,5 +1,7 @@
 #include "pwm1.h"
 
+#include <stdio.h>
+
 #include "clock.h"
 #include "lpc40xx.h"
 #include "lpc_peripherals.h"
@@ -36,18 +38,23 @@ void pwm1__set_duty_cycle(pwm1_channel_e pwm1_channel, float duty_cycle_in_perce
   switch (pwm1_channel) {
   case PWM1__2_0:
     LPC_PWM1->MR1 = match_reg_value;
+    fprintf(stderr, "MR0, and MR1\n");
     break;
   case PWM1__2_1:
     LPC_PWM1->MR2 = match_reg_value;
+    fprintf(stderr, "MR0, and MR2\n");
     break;
   case PWM1__2_2:
     LPC_PWM1->MR3 = match_reg_value;
+    fprintf(stderr, "MR0, and MR3\n");
     break;
   case PWM1__2_4:
     LPC_PWM1->MR5 = match_reg_value;
+    fprintf(stderr, "MR0, and MR4\n");
     break;
   case PWM1__2_5:
     LPC_PWM1->MR6 = match_reg_value;
+    fprintf(stderr, "MR0, and MR5\n");
     break;
   default:
     break;
