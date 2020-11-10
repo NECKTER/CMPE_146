@@ -26,6 +26,7 @@
 /**
  * Data structure for each I2C peripheral
  */
+
 typedef struct {
   LPC_I2C_TypeDef *const registers; ///< LPC memory mapped registers for the I2C bus
   const char *rtos_isr_trace_name;
@@ -44,6 +45,9 @@ typedef struct {
   uint8_t *input_byte_pointer;        ///< Used for reading I2C slave device
   const uint8_t *output_byte_pointer; ///< Used for writing data to the I2C slave device
   size_t number_of_bytes_to_transfer;
+
+  volatile size_t slave_mem_loc;
+  volatile uint8_t slave_memory[256];
 } i2c_s;
 
 /// Instances of structs for each I2C peripheral
@@ -150,6 +154,27 @@ void i2c__initialize(i2c_e i2c_number, uint32_t desired_i2c_bus_speed_in_hz, uin
 
   // Enable I2C and the interrupt for it
   lpc_i2c->CONSET = 0x40;
+  lpc_peripheral__enable_interrupt(peripheral_id, isrs[i2c_number], i2c_structs[i2c_number].rtos_isr_trace_name);
+}
+
+void i2c__initialize_slave(i2c_e i2c_number) {
+  const function__void_f isrs[] = {i2c0_isr, i2c1_isr, i2c2_isr};
+  const lpc_peripheral_e peripheral_ids[] = {LPC_PERIPHERAL__I2C0, LPC_PERIPHERAL__I2C1, LPC_PERIPHERAL__I2C2};
+
+  i2c_s *i2c = &i2c_structs[i2c_number];
+  LPC_I2C_TypeDef *lpc_i2c = i2c->registers;
+  const lpc_peripheral_e peripheral_id = peripheral_ids[i2c_number];
+
+  lpc_peripheral__turn_on_power_to(peripheral_id);
+  lpc_i2c->CONCLR = 0x6C; // Clear ALL I2C Flags
+
+  lpc_i2c->ADR0 = 0x70; // Edits
+                        //  lpc_i2c->ADR1 = 0x74; // Edits
+                        //  lpc_i2c->ADR2 = 0x78; // Edits
+                        //  lpc_i2c->ADR3 = 0x7c; // Edits
+
+  // Enable I2C and the interrupt for it
+  lpc_i2c->CONSET = 0x44; // Edits
   lpc_peripheral__enable_interrupt(peripheral_id, isrs[i2c_number], i2c_structs[i2c_number].rtos_isr_trace_name);
 }
 
@@ -274,6 +299,18 @@ static bool i2c__handle_state_machine(i2c_s *i2c) {
     I2C__STATE_MR_SLAVE_READ_NACK = 0x48,
     I2C__STATE_MR_SLAVE_ACK_SENT = 0x50,
     I2C__STATE_MR_SLAVE_NACK_SENT = 0x58,
+
+    // Slave Transmitter States:
+    I2C__STATE_ST_ADDRW_ACK = 0x60,
+    I2C__STATE_ST_ADDRD_ACK = 0x80,
+    I2C__STATE_ST_ADDRD_NACK = 0x88,
+    I2C__STATE_ST_RSSTOP = 0xA0,
+
+    // Slave Reciever States:
+    I2C__STATE_SR_ADDRR_ACK = 0xA8,
+    I2C__STATE_SR_TRANS_ACK = 0xB8,
+    I2C__STATE_SR_TRANS_NACK = 0xC0,
+    I2C__STATE_SR_LAST_ACK = 0xC8,
   };
 
   bool stop_sent = false;
@@ -292,8 +329,10 @@ static bool i2c__handle_state_machine(i2c_s *i2c) {
    */
 
   LPC_I2C_TypeDef *lpc_i2c = i2c->registers;
+  const char *i2cname = i2c->rtos_isr_trace_name;
+
   const unsigned i2c_state = lpc_i2c->STAT;
-  I2C__DEBUG_PRINTF("  HW State: 0x%02X", i2c_state);
+  I2C__DEBUG_PRINTF(" %s  HW State: 0x%02X", i2cname, i2c_state);
 
   switch (i2c_state) {
   // Start condition sent, so send the device address
@@ -382,6 +421,81 @@ static bool i2c__handle_state_machine(i2c_s *i2c) {
     i2c->error_code = lpc_i2c->STAT;
     break;
 
+  // Slave Transfer
+  case I2C__STATE_ST_ADDRW_ACK:
+    i2c->slave_mem_loc = -1;
+    i2c__set_ack_flag(lpc_i2c);
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
+    break;
+
+  case I2C__STATE_ST_ADDRD_ACK:
+    if (i2c->slave_mem_loc == -1) {
+      i2c->slave_mem_loc = lpc_i2c->DAT;
+      i2c__set_ack_flag(lpc_i2c);
+    } else if (i2c->slave_mem_loc < 256) {
+      i2c->slave_memory[i2c->slave_mem_loc] = lpc_i2c->DAT;
+      ++(i2c->slave_mem_loc);
+      i2c__set_ack_flag(lpc_i2c);
+    } else {
+      // not enough mem
+      i2c__set_nack_flag(lpc_i2c);
+    }
+
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
+    break;
+
+  case I2C__STATE_ST_ADDRD_NACK:
+    i2c__set_start_flag(lpc_i2c);
+    if (i2c->slave_mem_loc < 256) {
+      i2c->slave_memory[i2c->slave_mem_loc] = lpc_i2c->DAT;
+      ++(i2c->slave_mem_loc);
+      i2c__set_ack_flag(lpc_i2c);
+    } else {
+      // not enough mem
+      i2c__set_nack_flag(lpc_i2c);
+    }
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
+    break;
+
+  case I2C__STATE_ST_RSSTOP:
+    //    i2c__set_start_flag(lpc_i2c);
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
+    break;
+
+  // Slave Receive
+  case I2C__STATE_SR_ADDRR_ACK:
+    if (i2c->slave_mem_loc < 256) {
+      lpc_i2c->DAT = i2c->slave_memory[i2c->slave_mem_loc];
+      ++(i2c->slave_mem_loc);
+      i2c__set_ack_flag(lpc_i2c);
+    } else {
+      // not enough mem
+      i2c__set_nack_flag(lpc_i2c);
+    }
+
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
+    break;
+
+  case I2C__STATE_SR_TRANS_ACK:
+    if (i2c->slave_mem_loc < 256) {
+      lpc_i2c->DAT = i2c->slave_memory[i2c->slave_mem_loc];
+      ++(i2c->slave_mem_loc);
+      i2c__set_ack_flag(lpc_i2c);
+    } else {
+      // not enough mem
+      i2c__set_nack_flag(lpc_i2c);
+    }
+
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
+    break;
+
+  case I2C__STATE_SR_TRANS_NACK:
+  case I2C__STATE_SR_LAST_ACK:
+    i2c__set_ack_flag(lpc_i2c);
+    //    i2c__set_start_flag(lpc_i2c);
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
+    break;
+
   case I2C__STATE_MT_SLAVE_ADDR_NACK: // no break
   case I2C__STATE_MT_SLAVE_DATA_NACK: // no break
   case I2C__STATE_MR_SLAVE_READ_NACK: // no break
@@ -389,9 +503,9 @@ static bool i2c__handle_state_machine(i2c_s *i2c) {
   default:
     i2c->error_code = lpc_i2c->STAT;
     stop_sent = i2c__set_stop(lpc_i2c);
+    i2c__clear_si_flag_for_hw_to_take_next_action(lpc_i2c);
     break;
   }
-
   return stop_sent;
 }
 
@@ -401,8 +515,7 @@ static bool i2c__set_stop(LPC_I2C_TypeDef *i2c) {
   i2c->CONSET = stop_bit;
   i2c__clear_si_flag_for_hw_to_take_next_action(i2c);
 
-  while (i2c->CONSET & stop_bit) {
-  }
+  //  while (i2c->CONSET & stop_bit) {}
 
   return true;
 }

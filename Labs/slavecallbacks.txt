@@ -1,0 +1,22 @@
+bool i2c_slave_callback__read_memory(uint8_t memory_index, uint8_t *memory) {
+ // TODO: Read the data from slave_memory[memory_index] to *memory pointer
+ // TODO: return true if all is well (memory index is within bounds)
+ bool status = true;
+ // LPC_I2C2->ADRO0 |= memory_index;
+ *memory = slave_memory[memory_index];
+ if (LPC_I2C2->STAT == 0x78 || LPC_I2C2->STAT == 0xB0) {
+   status = false;
+ }
+ return status;
+}
+ 
+bool i2c_slave_callback__write_memory(uint8_t memory_index, uint8_t memory_value) {
+ // TODO: Write the memory_value at slave_memory[memory_index]
+ // TODO: return true if memory_index is within bounds
+ bool status = true;
+ slave_memory[memory_index] = memory_value;
+ if (LPC_I2C2->STAT == 0x78 || LPC_I2C2->STAT == 0xB0) {
+   status = false;
+ }
+ return status;
+}

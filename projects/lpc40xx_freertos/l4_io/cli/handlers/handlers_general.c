@@ -3,6 +3,11 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "queue.h"
+
+QueueHandle_t song_name_queue;
+typedef char songname_t[32];
+
 static void cli__task_list_print(sl_string_t user_input_minus_command_name, app_cli__print_string_function cli_output);
 
 app_cli_status_e cli__crash_me(app_cli__argument_t argument, sl_string_t user_input_minus_command_name,
@@ -71,4 +76,24 @@ static void cli__task_list_print(sl_string_t output_string, app_cli__print_strin
   cli_output(unused_cli_param, "Unable to provide you the task information along with their CPU and stack usage.\n");
   cli_output(unused_cli_param, "configUSE_TRACE_FACILITY macro at FreeRTOSConfig.h must be non-zero\n");
 #endif
+}
+
+app_cli_status_e cli__play(app_cli__argument_t argument, sl_string_t user_input_minus_command_name,
+                           app_cli__print_string_function cli_output) {
+  // sl_string is a powerful string library, and you can utilize the sl_string.h API to parse parameters of a command
+  // Sample code to output data back to the CLI
+  sl_string_t s = user_input_minus_command_name; // Re-use a string to save memory
+  char sch = 's';
+  printf("\n");
+  songname_t s_name = {0};
+  sl_string__copy_to(s, s_name, sizeof(s_name) - 1);
+  if (xQueueSend(song_name_queue, &s_name, 0)) {
+    puts("Songname on queue");
+  } else {
+    puts("Songname failed to queue");
+  }
+  printf("\n");
+  sl_string__printf(s, "CLI Command for play has been executed\n");
+  cli_output(NULL, s);
+  return APP_CLI_STATUS__SUCCESS;
 }

@@ -10,6 +10,7 @@
 #include "common_macros.h"
 #include "gpio.h"
 #include "gpio_lab.h"
+#include "i2c.h"
 #include "periodic_scheduler.h"
 #include "pwm1.h"
 #include "queue.h"
@@ -20,6 +21,11 @@
 
 #include "gpio_isr.h"
 #include "lpc_peripherals.h"
+
+#include "acceleration.h"
+#include "event_groups.h"
+#include "ff.h"
+#include <string.h>
 
 static void create_blinky_tasks(void);
 static void create_uart_task(void);
@@ -44,7 +50,11 @@ static QueueHandle_t adc_to_pwm_task_queue;
 #define Lab3 0
 #define Lab4 0
 #define Lab5 0
-#define Lab6 1
+#define Lab6 0
+#define Lab7 0
+#define WatchDog 0
+#define i2c 0
+#define mp3 1
 
 #if Lab5
 static SemaphoreHandle_t spi_bus_mutex;
@@ -76,34 +86,349 @@ void board_1_sender_task(void *p);
 void board_2_receiver_task(void *p);
 #endif
 
+#if Lab7
+static QueueHandle_t switch_queue;
+
+typedef enum { switch__off, switch__on } switch_e;
+
+void producer(void *p);
+void consumer(void *p);
+#endif
+
+#if WatchDog
+static QueueHandle_t watchdog_queue;
+static EventGroupHandle_t xCreateGroup;
+void watchdog_main();
+#endif
+
+#if i2c
+/*
+   // pp. 636, 648 i2C
+#define i2c1 1
+#if i2c1
+  LPC_IOCON->P0_0 &= ~0x41f;      // i2c_1
+  LPC_IOCON->P0_1 &= ~0x41f;      // i2c_1
+  LPC_IOCON->P0_0 |= 0x3;         // i2c_1
+  LPC_IOCON->P0_0 |= (0x0 << 3);  // i2c_1
+  LPC_IOCON->P0_0 |= (0x1 << 10); // i2c_1
+  LPC_IOCON->P0_1 |= 0x3;         // i2c_1
+  LPC_IOCON->P0_1 |= (0x3 << 3);  // i2c_1
+  LPC_IOCON->P0_1 |= (0x1 << 10); // i2c_1
+  i2c__initialize_slave(I2C__1);
+#else
+  LPC_IOCON->P1_30 &= ~0x7; // i2c_1
+  LPC_IOCON->P1_31 &= ~0x7; // i2c_1
+  LPC_IOCON->P1_30 |= 0x4;  // i2c_1
+  LPC_IOCON->P1_31 |= 0x4;  // i2c_1
+  i2c__initialize_slave(I2C__0);
+#endif
+
+  puts("I2c_1 Slave init");
+  i2c__write_single(I2C__2, 0x70, 0, 0x77);
+  uint8_t read = i2c__read_single(I2C__2, 0x70, 0);
+  printf("Read: 0x%02X from 0x70\n", read);
+  printf("Checking address: 0x%02X\n", 112);
+  if (i2c__detect(I2C__2, 112)) {
+    printf("I2C slave detected at address: 0x%02X\n", 112);
+  }
+ * */
+static volatile uint8_t slave_memory[256];
+bool i2c_slave_callback__read_memory(uint8_t memory_index, uint8_t *memory) {
+  // TODO: Read the data from slave_memory[memory_index] to *memory pointer
+  // TODO: return true if all is well (memory index is within bounds)
+  bool status = true;
+  // LPC_I2C2->ADRO0 |= memory_index;
+  *memory = slave_memory[memory_index];
+  if (LPC_I2C2->STAT == 0x78 || LPC_I2C2->STAT == 0xB0) {
+    status = false;
+  }
+  return status;
+}
+
+bool i2c_slave_callback__write_memory(uint8_t memory_index, uint8_t memory_value) {
+  // TODO: Write the memory_value at slave_memory[memory_index]
+  // TODO: return true if memory_index is within bounds
+  bool status = true;
+  slave_memory[memory_index] = memory_value;
+  if (LPC_I2C2->STAT == 0x78 || LPC_I2C2->STAT == 0xB0) {
+    status = false;
+  }
+  return status;
+}
+#endif
+
+#if mp3
+extern QueueHandle_t song_name_queue;
+static QueueHandle_t mp3_file_queue;
+typedef char songname_t[32];
+typedef char song_data_t[512];
+static void read_file(const char *filename) {
+  puts("Read and stored file name");
+  FIL file;
+  UINT bytes_written = 0;
+  FRESULT result = f_open(&file, filename, (FA_READ | FA_OPEN_EXISTING));
+  if (FR_OK == result) {
+    song_data_t buffer = {};
+    UINT bytes_to_read = 512;
+    UINT bytes_done_reading = 1;
+    while (bytes_done_reading > 0) {
+      FRESULT rd = f_read(&file, buffer, bytes_to_read, &bytes_done_reading);
+      xQueueSend(mp3_file_queue, buffer, portMAX_DELAY);
+      if (FR_OK == rd) {
+        printf("Read %d bytes\n", bytes_done_reading);
+      }
+    }
+    f_close(&file); // not sure when to close file
+  } else {
+    puts("Unavailable song");
+  }
+}
+static void mp3_file_reader_task(void *p) {
+  songname_t s_name = {};
+  while (1) {
+    if (xQueueReceive(song_name_queue, &s_name, 3000)) {
+      read_file(s_name);
+    } else {
+      puts("Queue did not receive item");
+    }
+  }
+}
+static void mp3_decoder_send_block(song_data_t s_data) {
+  for (size_t index = 0; index < sizeof(song_data_t); index++) {
+    vTaskDelay(3);
+    putchar(s_data[index]);
+  }
+}
+static void print_hex(song_data_t s_data) {
+  for (size_t index = 0; index < sizeof(song_data_t); index++) {
+    vTaskDelay(1);
+    printf("%02x", s_data[index]);
+  }
+}
+static void mp3_data_player_task(void *p) {
+  song_data_t s_data = {};
+  while (1) {
+    memset(&s_data[0], 0, sizeof(song_data_t));
+    if (xQueueReceive(mp3_file_queue, &s_data[0], portMAX_DELAY)) {
+      // mp3_decoder_send_block(s_data);
+      print_hex(s_data);
+    }
+  }
+}
+void milestone_1_main() {
+  song_name_queue = xQueueCreate(1, sizeof(songname_t));
+  mp3_file_queue = xQueueCreate(2, sizeof(song_data_t));
+  // TaskHandle_t get_name;
+  xTaskCreate(mp3_file_reader_task, "reader", 512, NULL, PRIORITY_MEDIUM, NULL);
+  xTaskCreate(mp3_data_player_task, "player", 512, NULL, PRIORITY_HIGH, NULL);
+  // xTaskCreate(get_song_name_task, "Get Song Name", 1, NULL, PRIORITY_MEDIUM,&get_name);
+}
+#endif
+
 int main(void) { // main function for project
   puts("Starting RTOS");
-
+  create_uart_task();
 #if outOfTheBox
   create_blinky_tasks();
-  create_uart_task();
 #else
+  milestone_1_main();
 
-  // TODO: Use uart_lab__init() function and initialize UART2 or UART3 (your choice)
-  // TODO: Pin Configure IO pins to perform UART2/UART3 function
-  uart_lab__init(UART_2, 96, 115200);
-  uart__enable_receive_interrupt(UART_2);
-  uart_lab__init(UART_3, 96, 115200);
-  uart__enable_receive_interrupt(UART_3);
-
-  xTaskCreate(board_2_receiver_task, /*description*/ "uart_task", /*stack depth*/ 4096 / sizeof(void *),
-              /*parameter*/ (void *)1,
-              /*priority*/ 1, /*optional handle*/ NULL);
-  xTaskCreate(board_1_sender_task, /*description*/ "uart_task2", /*stack depth*/ 4096 / sizeof(void *),
-              /*parameter*/ (void *)1,
-              /*priority*/ 2, /*optional handle*/ NULL);
+  puts("Main done");
 #endif
   vTaskStartScheduler(); // This function never returns unless RTOS scheduler runs out of memory and fails
   return 0;
 }
 
+#if WatchDog
+/*WatchDog Group Lab*/
+
+void write_file_using_fatfs_pi(acceleration__axis_data_s receive_value) {
+  const char *filename = "WatchDog_Data.csv";
+  FIL file; // File handle
+  UINT bytes_written = 0;
+
+  // Open for the first time
+  FRESULT result = f_open(&file, filename, (FA_WRITE | FA_CREATE_NEW));
+  if (FR_OK == result) {
+    char string[64] = "";
+    // sprintf(string, "Value,%i\n", 123);
+    sprintf(string, "x,y,z\n");
+    if (FR_OK == f_write(&file, string, strlen(string), &bytes_written)) {
+    } else {
+      printf("ERROR: Failed to write data to file\n");
+    }
+    sprintf(string, "%d,%d,%d\n", receive_value.x, receive_value.y, receive_value.z);
+    if (FR_OK == f_write(&file, string, strlen(string), &bytes_written)) {
+    } else {
+      printf("ERROR: Failed to write data to file\n");
+    }
+    f_close(&file);
+
+  } else {
+    result = f_open(&file, filename, (FA_WRITE | FA_OPEN_APPEND));
+    if (FR_OK == result) {
+      char string[64];
+      // sprintf(string, "Value,%i\n", 123);
+      sprintf(string, "%d,%d,%d\n", receive_value.x, receive_value.y, receive_value.z);
+      // fprintf(stderr, "printed\n");
+      if (FR_OK == f_write(&file, string, strlen(string), &bytes_written)) {
+      } else {
+        printf("ERROR: Failed to write data to file\n");
+      }
+      f_close(&file);
+
+    } else {
+      printf("ERROR %d: Failed to open: %s\n", result, filename);
+    }
+  }
+}
+
+acceleration__axis_data_s get_send_value() {
+  acceleration__axis_data_s avg;
+  int xVal = 0;
+  int yVal = 0;
+  int zVal = 0;
+  for (int i = 0; i < 100; i++) {
+    xVal += acceleration__get_data().x;
+    yVal += acceleration__get_data().y;
+    zVal += acceleration__get_data().z;
+    delay__ms(1);
+  }
+  avg.x = xVal / 100;
+  avg.y = yVal / 100;
+  avg.z = zVal / 100;
+  return avg;
+}
+
+void producer_of_sensor(void *p) {
+  // fprintf(stderr, "producer\n");
+  while (1) {
+    acceleration__axis_data_s send_value = get_send_value();
+    xQueueSend(watchdog_queue, &send_value, 0);
+    xEventGroupSetBits(xCreateGroup, (1 << 1));
+    vTaskDelay(1000);
+  }
+}
+
+// TODO: Create this task at PRIORITY_HIGH
+void consumer_of_sensor(void *p) {
+  acceleration__axis_data_s receive_value;
+  while (1) {
+    // TODO: Print a message before xQueueReceive()
+    // fprintf(stderr, "before xqueuereceive\n");
+    if (xQueueReceive(watchdog_queue, &receive_value, portMAX_DELAY)) {
+      //      fprintf(stderr, "x: %d, y: %d, z: %d\n", receive_value.x, receive_value.y, receive_value.z);
+      write_file_using_fatfs_pi(receive_value);
+    }
+    xEventGroupSetBits(xCreateGroup, (1 << 2));
+  }
+}
+
+void watchdog_task(void *params) {
+  while (1) {
+    vTaskDelay(1000);
+    EventBits_t check = xEventGroupWaitBits(xCreateGroup, (1 << 1) | (1 << 2), pdTRUE, pdFALSE, 200);
+    if (((check & (1 << 1)) != 0) && ((check & (1 << 2)) != 0)) {
+      // Was able to complete both tasks. Be Humble
+      //      fprintf(stderr, "Successfully completed both tasks\n");
+    } else {
+      // fprintf(stderr, "Producer task unfinished\n");
+      if (check & (1 << 1)) {
+        fprintf(stderr, "Consumer task unfinished\n");
+      } else if (check & (1 << 2)) {
+        fprintf(stderr, "Producer task unfinished\n");
+      } else {
+        fprintf(stderr, "Both tasks didnt finish\n");
+      }
+    }
+  }
+}
+void watchdog_main() {
+  if (acceleration__init()) {
+    fprintf(stderr, "Acceleration Initialized\n");
+  }
+  TaskHandle_t prod_watchdog;
+  TaskHandle_t cons_watchdog;
+  TaskHandle_t watchdog;
+  xTaskCreate(producer_of_sensor, "producer", 1024, NULL, 2, &prod_watchdog);
+  xTaskCreate(consumer_of_sensor, "consumer", 1024, NULL, 2, &cons_watchdog);
+  xTaskCreate(watchdog_task, "watchdog", 1024, NULL, 3, &watchdog);
+  // TODO Queue handle is not valid until you create it
+  watchdog_queue = xQueueCreate(
+      1, sizeof(acceleration__axis_data_s)); // Choose depth of item being our enum (1 should be okay for this example
+  xCreateGroup = xEventGroupCreate();
+}
+#endif
+
+#if Lab7
+/*
+
+  xTaskCreate(producer, /*description*/ "producer", /*stack depth*/ 4096 / sizeof(void *),
+/*parameter*/ (void *)1,
+/*priority*/ 1, /*optional handle*/ NULL);
+xTaskCreate(consumer, /*description*/ "consumer", /*stack depth*/ 4096 / sizeof(void *),
+            /*parameter*/ (void *)1,
+            /*priority*/ 2, /*optional handle*/ NULL);
+
+// TODO Queue handle is not valid until you create it
+switch_queue =
+    xQueueCreate(1, sizeof(switch_e)); // Choose depth of item being our enum (1 should be okay for this example)
+
+** /
+    // TODO: Create this task at PRIORITY_LOW
+    void producer(void *p) {
+  //  // SW3 p0.29
+  LPC_IOCON->P0_29 &= ~(0x3 << 3);
+  LPC_IOCON->P0_29 |= (1 << 3); // pull down
+  LPC_GPIO0->DIR &= ~(1 << 29); // set as input
+
+  while (1) {
+    // This xQueueSend() will internally switch context to "consumer" task because it is higher priority than this
+    // "producer" task Then, when the consumer task sleeps, we will resume out of xQueueSend()and go over to the next
+    // line
+
+    // TODO: Get some input value from your board
+    const switch_e switch_value = (LPC_GPIO0->PIN & (1 << 29)) >> 29; // value of switch
+
+    // TODO: Print a message before xQueueSend()
+    // Note: Use printf() and not fprintf(stderr, ...) because stderr is a polling printf
+    printf("sending switch_value: %d\n", switch_value);
+    xQueueSend(switch_queue, &switch_value, 0);
+    // TODO: Print a message after xQueueSend()
+    printf("Returned to producer task\n");
+
+    vTaskDelay(1000);
+  }
+}
+
+// TODO: Create this task at PRIORITY_HIGH
+void consumer(void *p) {
+  switch_e switch_value;
+  while (1) {
+    // TODO: Print a message before xQueueReceive()
+    printf("waiting to consume a value from the queue\n");
+    xQueueReceive(switch_queue, &switch_value, portMAX_DELAY);
+    // TODO: Print a message after xQueueReceive()
+    printf("received switch_value: %d\n", switch_value);
+  }
+}
+#endif
+
 #if Lab6
-void uart_read_task(void *p) {
+/*
+   // TODO: Use uart_lab__init() function and initialize UART2 or UART3 (your choice)
+  // TODO: Pin Configure IO pins to perform UART2/UART3 function
+  uart_lab__init(UART_2, 96, 115200);
+  uart__enable_receive_interrupt(UART_2);
+  uart_lab__init(UART_3, 96, 115200);
+  uart__enable_receive_interrupt(UART_3);
+   xTaskCreate(producer, /*description*/ "uart_task", /*stack depth*/ 4096 / sizeof(void *),
+              /*parameter*/ (void *)1,
+              /*priority*/ 1, /*optional handle*/ NULL);
+xTaskCreate(consumer, /*description*/ "uart_task2", /*stack depth*/ 4096 / sizeof(void *),
+            /*parameter*/ (void *)1,
+            /*priority*/ 2, /*optional handle*/ NULL);
+** / void uart_read_task(void *p) {
   while (1) {
     // TODO: Use uart_lab__polled_get() function and printf the received value
     char testValue = 0;
@@ -136,6 +461,7 @@ void board_1_sender_task(void *p) {
     // Send one char at a time to the other board including terminating NULL char
     for (int i = 0; i <= strlen(number_as_string); i++) {
       uart_lab__polled_put(UART_3, number_as_string[i]);
+      uart_lab__polled_put(UART_2, number_as_string[i]);
       printf("Sent: %c\n", number_as_string[i]);
     }
 

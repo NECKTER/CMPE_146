@@ -1,0 +1,171 @@
+#include <stdio.h>
+
+#include "FreeRTOS.h"
+#include "task.h"
+
+#include "board_io.h"
+#include "common_macros.h"
+#include "periodic_scheduler.h"
+#include "queue.h"
+#include "sj2_cli.h"
+// 'static' to make these functions 'private' to this file
+static void create_blinky_tasks(void);
+static void create_uart_task(void);
+static void blink_task(void *params);
+static void uart_task(void *params);
+
+#include "acceleration.h"
+#include "event_groups.h"
+#include "ff.h"
+#include <string.h>
+
+void write_file_using_fatfs_pi(acceleration__axis_data_s receive_value) {
+  const char *filename = "file.txt";
+  FIL file; // File handle
+  UINT bytes_written = 0;
+  FRESULT result = f_open(&file, filename, (FA_WRITE | FA_CREATE_ALWAYS));
+
+  if (FR_OK == result) {
+    char string[64];
+    // sprintf(string, "Value,%i\n", 123);
+    sprintf(string, "x: %d, y: %d, z: %d", receive_value.x, receive_value.y, receive_value.z);
+    if (FR_OK == f_write(&file, string, strlen(string), &bytes_written)) {
+    } else {
+      printf("ERROR: Failed to write data to file\n");
+    }
+    f_close(&file);
+  } else {
+    printf("ERROR: Failed to open: %s\n", filename);
+  }
+}
+
+static QueueHandle_t watchdog_queue;
+static EventGroupHandle_t xCreateGroup;
+acceleration__axis_data_s get_send_value() {
+  acceleration__axis_data_s avg;
+  int xVal = 0;
+  int yVal = 0;
+  int zVal = 0;
+  for (int i = 0; i < 100; i++) {
+    xVal += acceleration__get_data().x;
+    yVal += acceleration__get_data().y;
+    zVal += acceleration__get_data().z;
+    delay__ms(1);
+  }
+  avg.x = xVal / 100;
+  avg.y = yVal / 100;
+  avg.z = zVal / 100;
+  return avg;
+}
+
+void producer_of_sensor(void *p) {
+  // fprintf(stderr, "producer\n");
+  while (1) {
+    // This xQueueSend() will internally switch context to "consumer" task because it is higher priority than this
+    // "producer" task Then, when the consumer task sleeps, we will resume out of xQueueSend()and go over to the next
+    // line
+
+    // TODO: Get some input value from your board
+    acceleration__axis_data_s send_value = get_send_value();
+
+    // TODO: Print a message before xQueueSend()
+    // Note: Use printf() and not fprintf(stderr, ...) because stderr is a polling printf
+    // fprintf(stderr, "before xqueuesend\n");
+    // printf("send");
+    xQueueSend(watchdog_queue, &send_value, 0);
+    // TODO: Print a message after xQueueSend()
+    // fprintf(stderr, "after xqueuesend\n");
+    // fprintf(stderr, "------------------producer done--------------");
+    xEventGroupSetBits(xCreateGroup, (1 << 1));
+    vTaskDelay(1000);
+  }
+}
+
+// TODO: Create this task at PRIORITY_HIGH
+void consumer_of_sensor(void *p) {
+  acceleration__axis_data_s receive_value;
+  while (1) {
+    // TODO: Print a message before xQueueReceive()
+    // fprintf(stderr, "before xqueuereceive\n");
+    if (xQueueReceive(watchdog_queue, &receive_value, portMAX_DELAY)) {
+      fprintf(stderr, "x: %d, y: %d, z: %d\n", receive_value.x, receive_value.y, receive_value.z);
+      write_file_using_fatfs_pi(receive_value);
+    }
+    xEventGroupSetBits(xCreateGroup, (1 << 2));
+  }
+}
+
+void watchdog_task(void *params) {
+  while (1) {
+    vTaskDelay(1000);
+    // if (xEventGroupWaitBits(xCreateGroup, (1 << 1), pdTRUE, pdFALSE, 100) &&
+    //     xEventGroupWaitBits(xCreateGroup, (1 << 2), pdTRUE, pdFALSE, 100)) {
+    //   fprintf(stderr, "Successfully completed both tasks\n");
+    // } else {
+    //   if (!xEventGroupWaitBits(xCreateGroup, (1 << 1), pdTRUE, pdFALSE, 0)) {
+    //     fprintf(stderr, "Producer task unfinished\n");
+    //   }
+    //   if (!xEventGroupWaitBits(xCreateGroup, (1 << 2), pdTRUE, pdFALSE, 0)) {
+    //     fprintf(stderr, "Consumer task unfinished\n");
+    //   }
+    // }
+
+    // if (xEventGroupWaitBits(xCreateGroup, (1 << 1) | (1 << 2), pdTRUE, pdFALSE, 200)) {
+    //   fprintf(stderr, "Successfully completed both tasks\n");
+    // } else {
+    //   // fprintf(stderr, "Producer task unfinished\n");
+    //   if (xEventGroupWaitBits(xCreateGroup, (1 << 1), pdTRUE, pdFALSE, 0)) {
+    //     fprintf(stderr, "Consumer task unfinished\n");
+    //   } else if (xEventGroupWaitBits(xCreateGroup, (1 << 2), pdTRUE, pdFALSE, 0)) {
+    //     fprintf(stderr, "Producer task unfinished\n");
+    //   } else {
+    //     fprintf(stderr, "Both tasks didnt finish\n");
+    //   }
+    // }
+    EventBits_t check = xEventGroupWaitBits(xCreateGroup, (1 << 1) | (1 << 2), pdTRUE, pdFALSE, 200);
+    if (((check & (1 << 1)) != 0) && ((check & (1 << 2)) != 0)) {
+      fprintf(stderr, "Successfully completed both tasks\n");
+    } else {
+      // fprintf(stderr, "Producer task unfinished\n");
+      if (check & (1 << 1)) {
+        fprintf(stderr, "Consumer task unfinished\n");
+      } else if (check & (1 << 2)) {
+        fprintf(stderr, "Producer task unfinished\n");
+      } else {
+        fprintf(stderr, "Both tasks didnt finish\n");
+      }
+    }
+  }
+}
+void watchdog_main() {
+  if (acceleration__init()) {
+    fprintf(stderr, "Acceleration Initialized\n");
+  }
+  TaskHandle_t prod_watchdog;
+  TaskHandle_t cons_watchdog;
+  TaskHandle_t watchdog;
+  xTaskCreate(producer_of_sensor, "producer", 1024, NULL, 2, &prod_watchdog);
+  xTaskCreate(consumer_of_sensor, "consumer", 1024, NULL, 2, &cons_watchdog);
+  xTaskCreate(watchdog_task, "watchdog", 1024, NULL, 3, &watchdog);
+  // TODO Queue handle is not valid until you create it
+  watchdog_queue = xQueueCreate(
+      1, sizeof(acceleration__axis_data_s)); // Choose depth of item being our enum (1 should be okay for this example
+  xCreateGroup = xEventGroupCreate();
+}
+
+int main(void) {
+  create_blinky_tasks();
+  create_uart_task();
+
+  // If you have the ESP32 wifi module soldered on the board, you can try uncommenting this code
+  // See esp32/README.md for more details
+  // uart3_init();                                                                     // Also include:  uart3_init.h
+  // xTaskCreate(esp32_tcp_hello_world_task, "uart3", 1000, NULL, PRIORITY_LOW, NULL); // Include esp32_task.h
+
+  puts("Starting RTOS");
+  // producer_consumer_assignment();
+  watchdog_main();
+  vTaskStartScheduler(); // This function never returns unless RTOS scheduler runs out of memory and fails
+
+  return 0;
+}

@@ -1,0 +1,67 @@
+#include "acceleration.h"
+static QueueHandle_t watchdog_queue;
+acceleration__axis_data_s get_send_value() { return acceleration__get_data(); }
+
+void producer_of_sensor(void *p) {
+  // fprintf(stderr, "producer\n");
+  while (1) {
+    // This xQueueSend() will internally switch context to "consumer" task because it is higher priority than this
+    // "producer" task Then, when the consumer task sleeps, we will resume out of xQueueSend()and go over to the next
+    // line
+
+    // TODO: Get some input value from your board
+    acceleration__axis_data_s send_value = get_send_value();
+
+    // TODO: Print a message before xQueueSend()
+    // Note: Use printf() and not fprintf(stderr, ...) because stderr is a polling printf
+    fprintf(stderr, "before xqueuesend\n");
+    // printf("send");
+    xQueueSend(watchdog_queue, &send_value, 0);
+    // TODO: Print a message after xQueueSend()
+    fprintf(stderr, "after xqueuesend\n");
+    // fprintf(stderr, "------------------producer done--------------");
+    vTaskDelay(1000);
+  }
+}
+
+// TODO: Create this task at PRIORITY_HIGH
+void consumer_of_sensor(void *p) {
+  acceleration__axis_data_s receive_value;
+  while (1) {
+    // TODO: Print a message before xQueueReceive()
+    fprintf(stderr, "before xqueuereceive\n");
+    if (xQueueReceive(watchdog_queue, &receive_value, portMAX_DELAY)) {
+      fprintf(stderr, "x: %d, y: %d, z: %d\n", receive_value.x, receive_value.y, receive_value.z);
+    }
+  }
+}
+
+void watchdog_main() {
+  if (acceleration__init()) {
+    fprintf(stderr, "Acceleration Initialized\n");
+  }
+  TaskHandle_t prod_watchdog;
+  TaskHandle_t cons_watchdog;
+  xTaskCreate(producer_of_sensor, "producer", 1024, NULL, 1, &prod_watchdog);
+  xTaskCreate(consumer_of_sensor, "consumer", 1024, NULL, 2, &cons_watchdog);
+  // TODO Queue handle is not valid until you create it
+  watchdog_queue = xQueueCreate(
+      1, sizeof(acceleration__axis_data_s)); // Choose depth of item being our enum (1 should be okay for this example
+}
+
+int main(void) {
+  create_blinky_tasks();
+  create_uart_task();
+
+  // If you have the ESP32 wifi module soldered on the board, you can try uncommenting this code
+  // See esp32/README.md for more details
+  // uart3_init();                                                                     // Also include:  uart3_init.h
+  // xTaskCreate(esp32_tcp_hello_world_task, "uart3", 1000, NULL, PRIORITY_LOW, NULL); // Include esp32_task.h
+
+  puts("Starting RTOS");
+  // producer_consumer_assignment();
+  watchdog_main();
+  vTaskStartScheduler(); // This function never returns unless RTOS scheduler runs out of memory and fails
+
+  return 0;
+}

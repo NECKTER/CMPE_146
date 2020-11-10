@@ -34,8 +34,8 @@ void uart_lab__init(uart_number_e uart, uint32_t peripheral_clock, uint32_t baud
     LPC_IOCON->P4_28 = 0x2; // tx
     LPC_IOCON->P4_29 = 0x2; // rx
   } else {                  // uart_2
-    LPC_IOCON->P0_0 = 0x1;  // tx
-    LPC_IOCON->P0_1 = 0x1;  // rx
+    LPC_IOCON->P0_10 = 0x1; // tx
+    LPC_IOCON->P0_11 = 0x1; // rx
   }
 }
 
@@ -63,13 +63,28 @@ bool uart_lab__polled_put(uart_number_e uart, char output_byte) {
 }
 
 // Private function of our uart_lab.c
-static void your_receive_interrupt(void) {
+static void your_receive_interrupt_uart3(void) {
   // TODO: Read the IIR register to figure out why you got interrupted
   uint8_t uart_port = 1;
   if (!uart__get_struct(uart_port)->IIR & 0x1) {
-    uart_port = 0;
-    if (!uart__get_struct(uart_port)->IIR & 0x1)
-      return;
+    return;
+  }
+  //  fprintf(stderr, "\ninterrupt on uart_%d\n", uart_port + 2);
+  // TODO: Based on IIR status, read the LSR register to confirm if there is data to be read
+  // TODO: Based on LSR status, read the RBR register and input the data to the RX Queue
+  char byte = 0;
+  while (!uart_lab__polled_get(uart_port, &byte)) {
+    ;
+  }
+  //  fprintf(stderr, "\nReading value: %c\n", byte);
+  xQueueSendFromISR(your_uart_rx_queue, &byte, NULL);
+}
+
+static void your_receive_interrupt_uart2(void) {
+  // TODO: Read the IIR register to figure out why you got interrupted
+  uint8_t uart_port = 0;
+  if (!uart__get_struct(uart_port)->IIR & 0x1) {
+    return;
   }
   //  fprintf(stderr, "\ninterrupt on uart_%d\n", uart_port + 2);
   // TODO: Based on IIR status, read the LSR register to confirm if there is data to be read
@@ -87,9 +102,9 @@ static void your_receive_interrupt(void) {
 void uart__enable_receive_interrupt(uart_number_e uart_number) {
   uart__get_struct(uart_number)->IER = 0x1; // enable interrupt
   if (uart_number) {                        // uart_3
-    lpc_peripheral__enable_interrupt(LPC_PERIPHERAL__UART3, your_receive_interrupt, "uart3");
+    lpc_peripheral__enable_interrupt(LPC_PERIPHERAL__UART3, your_receive_interrupt_uart3, "uart3");
   } else { // uart_2
-    lpc_peripheral__enable_interrupt(LPC_PERIPHERAL__UART2, your_receive_interrupt, "uart2");
+    lpc_peripheral__enable_interrupt(LPC_PERIPHERAL__UART2, your_receive_interrupt_uart2, "uart2");
   }
   your_uart_rx_queue = xQueueCreate(16, sizeof(char));
 }
