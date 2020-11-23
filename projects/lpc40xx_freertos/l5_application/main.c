@@ -162,6 +162,10 @@ extern QueueHandle_t song_name_queue;
 static QueueHandle_t mp3_file_queue;
 typedef char songname_t[32];
 typedef char song_data_t[512];
+
+static volatile int menu = 0;
+const int number_of_menues = 2;
+
 static void read_file(const char *filename) {
   puts("Read and stored file name");
   FIL file;
@@ -215,6 +219,59 @@ static void mp3_data_player_task(void *p) {
     }
   }
 }
+
+static void select_menu() { menu = (menu + 1) % number_of_menues; }
+
+static void scan_Buttons() {
+  bool right_button = 0;
+  bool left_button = 0;
+  gpio_s RB = gpio__construct_as_input(GPIO__PORT_1, 19); // Right
+  gpio_s LB = gpio__construct_as_input(GPIO__PORT_1, 15); // Left
+  while (1) {
+    right_button = gpio__get(RB);
+    left_button = gpio__get(LB);
+    if (right_button) {
+      switch (menu) {
+      case 0: // Next song
+        puts("next Song");
+        break;
+      case 1: // volume up
+        puts("Volume Up");
+        break;
+      default:
+
+        break;
+      }
+    }
+    if (left_button) {
+      switch (menu) {
+      case 0: // previous song
+        puts("previous Song");
+        break;
+      case 1: // volume down
+        puts("Volume down");
+        break;
+      default:
+
+        break;
+      }
+    }
+    vTaskDelay(250);
+  }
+}
+
+static void play_pause() { fprintf(stderr, "play/pause"); }
+
+static void button_init() {
+
+  gpio0__attach_interrupt(29, GPIO_INTR__RISING_EDGE, play_pause);  // Play pause
+  gpio0__attach_interrupt(30, GPIO_INTR__RISING_EDGE, select_menu); // menu select
+
+  // scan function
+  xTaskCreate(scan_Buttons, "scan_Buttons", 4096, NULL, PRIORITY_MEDIUM, NULL);
+  NVIC_EnableIRQ(GPIO_IRQn); // Enable interrupt gate for the GPIO
+}
+
 void milestone_1_main() {
   song_name_queue = xQueueCreate(1, sizeof(songname_t));
   mp3_file_queue = xQueueCreate(2, sizeof(song_data_t));
@@ -223,6 +280,7 @@ void milestone_1_main() {
   xTaskCreate(mp3_data_player_task, "player", 512, NULL, PRIORITY_HIGH, NULL);
   // xTaskCreate(get_song_name_task, "Get Song Name", 1, NULL, PRIORITY_MEDIUM,&get_name);
 }
+
 #endif
 
 int main(void) { // main function for project
@@ -231,8 +289,8 @@ int main(void) { // main function for project
 #if outOfTheBox
   create_blinky_tasks();
 #else
-  milestone_1_main();
-
+  //  milestone_1_main();
+  button_init();
   puts("Main done");
 #endif
   vTaskStartScheduler(); // This function never returns unless RTOS scheduler runs out of memory and fails
