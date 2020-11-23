@@ -160,6 +160,8 @@ bool i2c_slave_callback__write_memory(uint8_t memory_index, uint8_t memory_value
 #if mp3
 extern QueueHandle_t song_name_queue;
 static QueueHandle_t mp3_file_queue;
+static SemaphoreHandle_t signal_playPause;
+static SemaphoreHandle_t signal_menu;
 typedef char songname_t[32];
 typedef char song_data_t[512];
 
@@ -220,7 +222,13 @@ static void mp3_data_player_task(void *p) {
   }
 }
 
-static void select_menu() { menu = (menu + 1) % number_of_menues; }
+static void select_menu() {
+  while (1) {
+    if (xSemaphoreTake(signal_menu, portMAX_DELAY)) {
+      menu = (menu + 1) % number_of_menues;
+    }
+  }
+}
 
 static void scan_Buttons() {
   bool right_button = 0;
@@ -256,19 +264,31 @@ static void scan_Buttons() {
         break;
       }
     }
-    vTaskDelay(250);
+    vTaskDelay(150);
   }
 }
 
-static void play_pause() { fprintf(stderr, "play/pause"); }
+static void play_pause() {
+  while (1) {
+    if (xSemaphoreTake(signal_playPause, portMAX_DELAY)) {
+      puts("play/pause");
+    }
+  }
+}
+
+static void signal_PlayPauseISR() { xSemaphoreGiveFromISR(signal_playPause, 0); }
+static void signal_menuISR() { xSemaphoreGiveFromISR(signal_menu, 0); }
 
 static void button_init() {
-
-  gpio0__attach_interrupt(29, GPIO_INTR__RISING_EDGE, play_pause);  // Play pause
-  gpio0__attach_interrupt(30, GPIO_INTR__RISING_EDGE, select_menu); // menu select
+  signal_playPause = xSemaphoreCreateBinary();
+  signal_menu = xSemaphoreCreateBinary();
+  gpio0__attach_interrupt(29, GPIO_INTR__RISING_EDGE, signal_PlayPauseISR); // Play pause
+  gpio0__attach_interrupt(30, GPIO_INTR__RISING_EDGE, signal_menuISR);      // menu select
 
   // scan function
-  xTaskCreate(scan_Buttons, "scan_Buttons", 4096, NULL, PRIORITY_MEDIUM, NULL);
+  xTaskCreate(scan_Buttons, "scan_Buttons", 4096, NULL, 2, NULL);
+  xTaskCreate(play_pause, "play_pause", 4096, NULL, 3, NULL);
+  xTaskCreate(select_menu, "select_menu", 4096, NULL, 3, NULL);
   NVIC_EnableIRQ(GPIO_IRQn); // Enable interrupt gate for the GPIO
 }
 
