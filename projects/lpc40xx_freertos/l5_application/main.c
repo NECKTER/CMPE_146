@@ -176,9 +176,15 @@ char song_array[2][32];
 int song_count = 0;
 bool new_song_interrupt = false;
 uint16_t adc_value;
+uint8_t volume = 0x7E;
 
 static volatile int menu = 0;
-const int number_of_menues = 2;
+const int number_of_menues = 5;
+
+gpio_s Led0;
+gpio_s Led1;
+gpio_s Led2;
+gpio_s Led3;
 
 static void read_file(const char *filename) {
   puts("Read and stored file name");
@@ -246,10 +252,69 @@ static void mp3_data_player_task(void *p) {
   }
 }
 
+static void set_LEDs(int ld0, int ld1, int ld2, int ld3) {
+  ld0 ? gpio__reset(Led0) : gpio__set(Led0);
+  ld1 ? gpio__reset(Led1) : gpio__set(Led1);
+  ld2 ? gpio__reset(Led2) : gpio__set(Led2);
+  ld3 ? gpio__reset(Led3) : gpio__set(Led3);
+}
+
 static void select_menu() {
   while (1) {
     if (xSemaphoreTake(signal_menu, portMAX_DELAY)) {
       menu = (menu + 1) % number_of_menues;
+      switch (menu) {
+      case 0:
+        set_LEDs(0, 0, 0, 0);
+        break;
+      case 1:
+        set_LEDs(0, 0, 0, 1);
+        break;
+      case 2:
+        set_LEDs(0, 0, 1, 0);
+        break;
+      case 3:
+        set_LEDs(0, 0, 1, 1);
+        break;
+      case 4:
+        set_LEDs(0, 1, 0, 0);
+        break;
+      case 5:
+        set_LEDs(0, 1, 0, 1);
+        break;
+      case 6:
+        set_LEDs(0, 1, 1, 0);
+        break;
+      case 7:
+        set_LEDs(0, 1, 1, 1);
+        break;
+      case 8:
+        set_LEDs(1, 0, 0, 0);
+        break;
+      case 9:
+        set_LEDs(1, 0, 0, 1);
+        break;
+      case 10:
+        set_LEDs(1, 0, 1, 0);
+        break;
+      case 11:
+        set_LEDs(1, 0, 1, 1);
+        break;
+      case 12:
+        set_LEDs(1, 1, 0, 0);
+        break;
+      case 13:
+        set_LEDs(1, 1, 0, 1);
+        break;
+      case 14:
+        set_LEDs(1, 1, 1, 0);
+        break;
+      case 15:
+        set_LEDs(1, 1, 1, 1);
+        break;
+      default:
+        break;
+      }
     }
   }
 }
@@ -274,12 +339,16 @@ static void scan_Buttons() {
         xQueueSendFromISR(song_name_queue, song_array[song_count], NULL);
         break;
       case 1: // volume up
-              //        puts("Volume Up");
-              //          if (adc_value >= 2000) {
-              //              set_volume(0x70, 0x3F);
-              //          } else {
-              //              set_volume(0x18, 0x18);
-              //          }
+        if (volume > 0x00) {
+          volume = volume - 0x1;
+          set_volume(volume, volume);
+        }
+        break;
+      case 2: // bass
+        break;
+      case 3: // treble
+        break;
+      case 4: // scroll
         break;
       default: // trebble and bass
 
@@ -298,7 +367,16 @@ static void scan_Buttons() {
         xQueueSendFromISR(song_name_queue, song_array[song_count], NULL);
         break;
       case 1: // volume down
-              //        puts("Volume down");
+        if (volume < 0xFE) {
+          volume = volume + 0x1;
+          set_volume(volume, volume);
+        }
+        break;
+      case 2: // bass
+        break;
+      case 3: // treble
+        break;
+      case 4: // scroll
         break;
       default:
 
@@ -326,6 +404,12 @@ static void button_init() {
   signal_menu = xSemaphoreCreateBinary();
   gpio0__attach_interrupt(29, GPIO_INTR__RISING_EDGE, signal_PlayPauseISR); // Play pause
   gpio0__attach_interrupt(30, GPIO_INTR__RISING_EDGE, signal_menuISR);      // menu select
+
+  Led0 = gpio__construct_as_output(1, 18);
+  Led1 = gpio__construct_as_output(1, 24);
+  Led2 = gpio__construct_as_output(1, 26);
+  Led3 = gpio__construct_as_output(2, 3);
+  set_LEDs(0, 0, 0, 0);
 
   // scan function
   xTaskCreate(scan_Buttons, "scan_Buttons", 4096, NULL, 2, NULL);
@@ -420,10 +504,10 @@ int main(void) { // main function for project
   create_blinky_tasks();
 #else
   //  milestone_1_main();
+  button_init();
   pin_config();
   milestone_2_main();
   milestone_1_main();
-  button_init();
   //  adc_setup();
 
   puts("Main done");
