@@ -158,12 +158,24 @@ bool i2c_slave_callback__write_memory(uint8_t memory_index, uint8_t memory_value
 #endif
 
 #if mp3
+#include "LCD_driver.h"
+#include "audio_driver.h"
+#include "i2c_slave_init.h"
+#include "uart_lab.h"
+
 extern QueueHandle_t song_name_queue;
 static QueueHandle_t mp3_file_queue;
 static SemaphoreHandle_t signal_playPause;
 static SemaphoreHandle_t signal_menu;
+const int NUM_OF_SONGS = 2;
 typedef char songname_t[32];
 typedef char song_data_t[512];
+bool pause_music_interrupt = false;
+
+char song_array[2][32];
+int song_count = 0;
+bool new_song_interrupt = false;
+uint16_t adc_value;
 
 static volatile int menu = 0;
 const int number_of_menues = 2;
@@ -172,17 +184,28 @@ static void read_file(const char *filename) {
   puts("Read and stored file name");
   FIL file;
   UINT bytes_written = 0;
+  new_song_interrupt = false;
   FRESULT result = f_open(&file, filename, (FA_READ | FA_OPEN_EXISTING));
   if (FR_OK == result) {
     song_data_t buffer = {};
     UINT bytes_to_read = 512;
     UINT bytes_done_reading = 1;
     while (bytes_done_reading > 0) {
-      FRESULT rd = f_read(&file, buffer, bytes_to_read, &bytes_done_reading);
-      xQueueSend(mp3_file_queue, buffer, portMAX_DELAY);
-      if (FR_OK == rd) {
-        printf("Read %d bytes\n", bytes_done_reading);
+      if (new_song_interrupt) {
+        break;
       }
+      if (!pause_music_interrupt) {
+        FRESULT rd = f_read(&file, buffer, bytes_to_read, &bytes_done_reading);
+        xQueueSend(mp3_file_queue, buffer, portMAX_DELAY);
+      } else {
+        bytes_done_reading = 1;
+      }
+      // FRESULT rd = f_read(&file, buffer, bytes_to_read, &bytes_done_reading);
+      // xQueueSend(mp3_file_queue, buffer, portMAX_DELAY);
+
+      // if (FR_OK == rd) {
+      //   printf("%d bytes\n", bytes_done_reading);
+      // }
     }
     f_close(&file); // not sure when to close file
   } else {
@@ -217,7 +240,8 @@ static void mp3_data_player_task(void *p) {
     memset(&s_data[0], 0, sizeof(song_data_t));
     if (xQueueReceive(mp3_file_queue, &s_data[0], portMAX_DELAY)) {
       // mp3_decoder_send_block(s_data);
-      print_hex(s_data);
+      //      print_hex(s_data);
+      play_data(&s_data, 512);
     }
   }
 }
@@ -241,12 +265,23 @@ static void scan_Buttons() {
     if (right_button) {
       switch (menu) {
       case 0: // Next song
-        puts("next Song");
+              //        puts("next Song");
+        new_song_interrupt = true;
+        song_count++;
+        if (song_count >= NUM_OF_SONGS) {
+          song_count = 0;
+        }
+        xQueueSendFromISR(song_name_queue, song_array[song_count], NULL);
         break;
       case 1: // volume up
-        puts("Volume Up");
+              //        puts("Volume Up");
+              //          if (adc_value >= 2000) {
+              //              set_volume(0x70, 0x3F);
+              //          } else {
+              //              set_volume(0x18, 0x18);
+              //          }
         break;
-      default:
+      default: // trebble and bass
 
         break;
       }
@@ -254,10 +289,16 @@ static void scan_Buttons() {
     if (left_button) {
       switch (menu) {
       case 0: // previous song
-        puts("previous Song");
+              //        puts("previous Song");
+        new_song_interrupt = true;
+        song_count--;
+        if (song_count < 0) {
+          song_count = NUM_OF_SONGS - 1;
+        }
+        xQueueSendFromISR(song_name_queue, song_array[song_count], NULL);
         break;
       case 1: // volume down
-        puts("Volume down");
+              //        puts("Volume down");
         break;
       default:
 
@@ -271,7 +312,8 @@ static void scan_Buttons() {
 static void play_pause() {
   while (1) {
     if (xSemaphoreTake(signal_playPause, portMAX_DELAY)) {
-      puts("play/pause");
+      new_song_interrupt = new_song_interrupt ? false : true;
+      //      puts("play/pause");
     }
   }
 }
@@ -292,14 +334,82 @@ static void button_init() {
   NVIC_EnableIRQ(GPIO_IRQn); // Enable interrupt gate for the GPIO
 }
 
+TaskHandle_t read_handle;
+TaskHandle_t play_handle;
 void milestone_1_main() {
   song_name_queue = xQueueCreate(1, sizeof(songname_t));
   mp3_file_queue = xQueueCreate(2, sizeof(song_data_t));
-  // TaskHandle_t get_name;
-  xTaskCreate(mp3_file_reader_task, "reader", 512, NULL, PRIORITY_MEDIUM, NULL);
-  xTaskCreate(mp3_data_player_task, "player", 512, NULL, PRIORITY_HIGH, NULL);
-  // xTaskCreate(get_song_name_task, "Get Song Name", 1, NULL, PRIORITY_MEDIUM,&get_name);
+
+  xTaskCreate(mp3_file_reader_task, "reader", 512, NULL, 2, &read_handle);
+  xTaskCreate(mp3_data_player_task, "player", 512, NULL, 1, &play_handle);
+  // xTaskCreate(get_song_name_task, "Get Song Name", 1, NULL, PRIORITY_MEDIUM, &get_name);
 }
+
+// #include "LCD_display.h"
+#include "adc.h"
+#include "gpio.h"
+#include "gpio_isr.h"
+#include "ssp2.h"
+
+void spi_task(void *p) {
+  reset();
+  ssp2__initialize(24);
+  // gpio__set(xdcs_pin);
+  while (1) {
+    // write_decoder();
+    sci_write(0x0B, 0x050E);
+    uint16_t p = sci_read(0x0B);
+    // uint8_t p = 5;
+    vTaskDelay(100);
+    fprintf(stderr, "Version: %04x\n", p);
+  }
+}
+void milestone_2_main() {
+  gpio__construct_with_function(GPIO__PORT_1, 4, GPIO__FUNCTION_4); // mosi
+  gpio__construct_with_function(GPIO__PORT_1, 1, GPIO__FUNCTION_4); // miso
+  gpio__construct_with_function(GPIO__PORT_1, 0, GPIO__FUNCTION_4); // sck
+  // reset();
+  ssp2__initialize(24);
+  sine_test(2, 3000);
+  begin();
+  // xTaskCreate(spi_task, "task1", (512U * 4) / sizeof(void *), NULL, 1, NULL);
+}
+
+// void adc_task(void *p) {
+//  adc__initialize();
+//  adc__enable_burst_mode(ADC__CHANNEL_5);
+//  LPC_IOCON->P1_31 &= ~(1 << 7);
+//  adc_value = 10;
+//  int currVal = 0;
+//  while (1) {
+//    adc_value = adc__get_channel_reading_with_burst_mode();
+//    // fprintf(stderr, "res:%d", adc_value);
+//    if (adc_value - currVal > 50 || adc_value - currVal < -50) {
+//      currVal = adc_value;
+//      if (adc_value < 500) {
+//        set_volume(0x00, 0x00);
+//      } else if (adc_value < 1000) {
+//        set_volume(0x0F, 0x0F);
+//      } else if (adc_value < 1500) {
+//        set_volume(0x30, 0x30);
+//      } else if (adc_value < 2000) {
+//        set_volume(0x4F, 0x4F);
+//      } else if (adc_value < 2500) {
+//        set_volume(0x5F, 0x5F);
+//      } else if (adc_value < 3000) {
+//        set_volume(0x6F, 0x6F);
+//      } else if (adc_value < 3500) {
+//        set_volume(0xBF, 0xBF);
+//      } else {
+//        set_volume(0xFE, 0xFE);
+//      }
+//    }
+//
+//    vTaskDelay(2000);
+//  }
+//}
+
+// void adc_setup() { xTaskCreate(adc_task, "adc_task", (512U * 4) / sizeof(void *), NULL, 3, NULL); }
 
 #endif
 
@@ -310,7 +420,12 @@ int main(void) { // main function for project
   create_blinky_tasks();
 #else
   //  milestone_1_main();
+  pin_config();
+  milestone_2_main();
+  milestone_1_main();
   button_init();
+  //  adc_setup();
+
   puts("Main done");
 #endif
   vTaskStartScheduler(); // This function never returns unless RTOS scheduler runs out of memory and fails
