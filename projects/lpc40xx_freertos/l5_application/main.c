@@ -54,7 +54,7 @@ static QueueHandle_t adc_to_pwm_task_queue;
 #define Lab7 0
 #define WatchDog 0
 #define i2c 0
-#define mp3 1
+#define mp3 0
 
 #if Lab5
 static SemaphoreHandle_t spi_bus_mutex;
@@ -503,12 +503,15 @@ int main(void) { // main function for project
 #if outOfTheBox
   create_blinky_tasks();
 #else
+
+#if mp3
   //  milestone_1_main();
   button_init();
   pin_config();
   milestone_2_main();
   milestone_1_main();
   //  adc_setup();
+#endif
 
   puts("Main done");
 #endif
